@@ -28,3 +28,8 @@ Or: open this folder in Android Studio and choose Build > Build APK(s).
 At the scheduled time you get a notification. Unlock the phone and tap **OK**.
 The app checks location, opens Zoho, replays your taps, then watches 6 s for a stop rule.
 You get a final notification: done, stopped (with the reason) or failed (with the step).
+
+## Note on recording
+While the floating bar is showing, a transparent layer records each tap and swipe and passes it on to the
+app underneath, so the app behaves normally. Taps are saved by the button text/ID under your finger
+(so they survive small layout changes), and by screen position if no text exists.

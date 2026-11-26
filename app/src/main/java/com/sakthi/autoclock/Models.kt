@@ -12,11 +12,15 @@ data class Step(
     val x: Int,
     val y: Int,
     val delayMs: Long,
-    var optional: Boolean
+    var optional: Boolean,
+    val x2: Int = 0,
+    val y2: Int = 0,
+    val durMs: Long = 0
 ) {
     fun hasIdentity() = !text.isNullOrBlank() || !desc.isNullOrBlank() || !viewId.isNullOrBlank()
 
     fun label(): String = when {
+        type == "SWIPE" -> "swipe ($x,$y) to ($x2,$y2)"
         type == "TAP_TODAY" -> "tap today's date"
         !text.isNullOrBlank() -> "tap \"$text\""
         !desc.isNullOrBlank() -> "tap \"$desc\""
@@ -28,6 +32,7 @@ data class Step(
         .put("type", type).put("viewId", viewId ?: "").put("text", text ?: "")
         .put("desc", desc ?: "").put("x", x).put("y", y)
         .put("delayMs", delayMs).put("optional", optional)
+        .put("x2", x2).put("y2", y2).put("durMs", durMs)
 
     companion object {
         fun fromJson(o: JSONObject) = Step(
@@ -36,7 +41,8 @@ data class Step(
             o.optString("text").ifBlank { null },
             o.optString("desc").ifBlank { null },
             o.optInt("x"), o.optInt("y"),
-            o.optLong("delayMs", 800), o.optBoolean("optional")
+            o.optLong("delayMs", 800), o.optBoolean("optional"),
+            o.optInt("x2"), o.optInt("y2"), o.optLong("durMs")
         )
     }
 }

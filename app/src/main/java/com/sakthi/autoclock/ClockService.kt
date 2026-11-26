@@ -40,6 +40,8 @@ class ClockService : AccessibilityService() {
     private val recent = mutableListOf<Pair<Long, String>>()   // toast texts
     private var bar: View? = null
     private var counter: TextView? = null
+    private var cap: View? = null
+    private var capLp: WindowManager.LayoutParams? = null
 
     override fun onServiceConnected() { instance = this }
     override fun onInterrupt() {}
@@ -59,7 +61,6 @@ class ClockService : AccessibilityService() {
                     if (t.isNotEmpty()) remember(t)
                 }
             }
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> rec?.let { recordClick(it, e) }
         }
     }
 
@@ -97,38 +98,105 @@ class ClockService : AccessibilityService() {
         return null
     }
 
-    private fun recordClick(a: Automation, e: AccessibilityEvent) {
-        val pkg = e.packageName?.toString() ?: return
-        if (pkg in ignoredPkgs()) return
-        val n = e.source ?: return
-        if (a.targetPackage.isEmpty()) a.targetPackage = pkg
+    // Touch capture: a transparent layer sees every touch, records it, then replays it to the app underneath.
+    private fun showCapture() {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val v = View(this)
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        v.setOnTouchListener(object : View.OnTouchListener {
+            var dx = 0f; var dy = 0f; var t0 = 0L
+            override fun onTouch(view: View, ev: MotionEvent): Boolean {
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> { dx = ev.rawX; dy = ev.rawY; t0 = System.currentTimeMillis() }
+                    MotionEvent.ACTION_UP -> onTouchDone(dx.toInt(), dy.toInt(), ev.rawX.toInt(), ev.rawY.toInt(),
+                        System.currentTimeMillis() - t0)
+                }
+                return true
+            }
+        })
+        wm.addView(v, lp)
+        cap = v; capLp = lp
+    }
 
+    private fun onTouchDone(x1: Int, y1: Int, x2: Int, y2: Int, dur: Long) {
+        val moved = Math.hypot((x2 - x1).toDouble(), (y2 - y1).toDouble()) > 40
+        rec?.let { recordTouch(it, x1, y1, x2, y2, dur, moved) }
+        val p = Path().apply {
+            moveTo(x1.toFloat(), y1.toFloat())
+            if (moved) lineTo(x2.toFloat(), y2.toFloat())
+        }
+        forward(p, if (moved) dur.coerceIn(100L, 1500L) else 50L)
+    }
+
+    private fun forward(p: Path, dur: Long) {
+        setCaptureTouchable(false)
+        scope.launch {
+            delay(80)
+            val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, dur)).build()
+            val ok = dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) { setCaptureTouchable(true) }
+                override fun onCancelled(gestureDescription: GestureDescription?) { setCaptureTouchable(true) }
+            }, null)
+            if (!ok) setCaptureTouchable(true)
+        }
+    }
+
+    private fun setCaptureTouchable(on: Boolean) {
+        val v = cap ?: return
+        val lp = capLp ?: return
+        lp.flags = if (on) lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                   else lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        try { (getSystemService(WINDOW_SERVICE) as WindowManager).updateViewLayout(v, lp) } catch (_: Exception) {}
+    }
+
+    private fun nodeAt(x: Int, y: Int): AccessibilityNodeInfo? {
+        val r = Rect()
+        val hits = allNodes().filter { it.isVisibleToUser }
+            .filter { it.getBoundsInScreen(r); r.contains(x, y) }
+            .sortedBy { it.getBoundsInScreen(r); r.width().toLong() * r.height() }
+        return hits.firstOrNull { !it.text.isNullOrBlank() || !it.contentDescription.isNullOrBlank() }
+            ?: hits.firstOrNull { !it.viewIdResourceName.isNullOrBlank() }
+    }
+
+    private fun recordTouch(a: Automation, x1: Int, y1: Int, x2: Int, y2: Int, dur: Long, moved: Boolean) {
+        val pkg = rootInActiveWindow?.packageName?.toString() ?: return
+        if (pkg in ignoredPkgs()) return
+        if (a.targetPackage.isEmpty()) a.targetPackage = pkg
         val now = System.currentTimeMillis()
         val delay = if (a.steps.isEmpty()) 0L else (now - lastClick).coerceIn(500L, 6000L)
         lastClick = now
+        val optional = pkg != a.targetPackage
 
-        val day = Calendar.getInstance().get(Calendar.DAY_OF_MONTH).toString()
-        val text = firstText(n)
-        val desc = n.contentDescription?.toString()
-        val isToday = dayMatch(text, day) || dayMatch(desc, day)
-        val r = Rect(); n.getBoundsInScreen(r)
-
-        a.steps.add(
-            Step(
-                type = if (isToday) "TAP_TODAY" else "TAP",
-                viewId = if (isToday) null else n.viewIdResourceName,
-                text = if (isToday) null else text,
-                desc = if (isToday) null else desc,
-                x = r.centerX(), y = r.centerY(),
-                delayMs = delay,
-                optional = pkg != a.targetPackage      // e.g. Google's location dialog
+        if (moved) {
+            a.steps.add(Step("SWIPE", null, null, null, x1, y1, delay, optional, x2, y2, dur.coerceIn(100L, 1500L)))
+        } else {
+            val day = Calendar.getInstance().get(Calendar.DAY_OF_MONTH).toString()
+            val n = nodeAt(x1, y1)
+            val text = n?.let { firstText(it) }
+            val desc = n?.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+            val isToday = dayMatch(text, day) || dayMatch(desc, day)
+            a.steps.add(
+                Step(
+                    type = if (isToday) "TAP_TODAY" else "TAP",
+                    viewId = if (isToday) null else n?.viewIdResourceName,
+                    text = if (isToday) null else text,
+                    desc = if (isToday) null else desc,
+                    x = x1, y = y1, delayMs = delay, optional = optional
+                )
             )
-        )
+        }
         counter?.text = "● ${a.steps.size}"
     }
 
     private fun showBar() {
         hideBar()
+        showCapture()
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -179,8 +247,10 @@ class ClockService : AccessibilityService() {
     }
 
     private fun hideBar() {
-        try { bar?.let { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(it) } } catch (_: Exception) {}
-        bar = null; counter = null
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        try { bar?.let { wm.removeView(it) } } catch (_: Exception) {}
+        try { cap?.let { wm.removeView(it) } } catch (_: Exception) {}
+        bar = null; counter = null; cap = null; capLp = null
     }
 
     private fun pickGuard(a: Automation) {
@@ -276,6 +346,13 @@ class ClockService : AccessibilityService() {
         return tapAt(r.centerX(), r.centerY())
     }
 
+    private fun swipe(s: Step): Boolean {
+        val p = Path().apply { moveTo(s.x.toFloat(), s.y.toFloat()); lineTo(s.x2.toFloat(), s.y2.toFloat()) }
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p, 0, s.durMs.coerceAtLeast(100L))).build()
+        return dispatchGesture(g, null, null)
+    }
+
     private fun tapAt(x: Int, y: Int): Boolean {
         val p = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build()
@@ -321,6 +398,7 @@ class ClockService : AccessibilityService() {
         val deadline = System.currentTimeMillis() + if (s.optional) 4000L else 15000L
         while (System.currentTimeMillis() < deadline) {
             hitGuard(a, since)?.let { return Outcome.Stopped(it.message) }
+            if (s.type == "SWIPE") { swipe(s); return Outcome.Done }
             if (!s.hasIdentity() && s.type == "TAP") { tapAt(s.x, s.y); return Outcome.Done }
             findNode(s)?.let { click(it); return Outcome.Done }
             delay(500)
