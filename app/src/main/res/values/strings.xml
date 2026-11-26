@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">AutoClock</string>
+    <string name="a11y_desc">Records the taps you make in another app and replays them on a schedule you set.</string>
+</resources>
